@@ -1,0 +1,128 @@
+# Укажите ID сервисного аккаунта, от имени которого будет управляться группа ВМ
+service_account_id: some_id   # ID сервисного аккаунта sa-instance-group-manager
+
+# Имя и описание группы ВМ
+name: web-servers-pool                     # Уникальное имя группы виртуальных машин
+description: Web servers                   # Описание группы (необязательно)
+
+# Политика масштабирования
+scale_policy:
+  auto_scale:
+    min_zone_size: 1             # Минимальное число ВМ в каждой зоне доступности
+    max_size: 3                  # Общее максимальное число ВМ в группе
+    measurement_duration: 60s    # Время, за которое собираются метрики перед принятием решения
+    warmup_duration: 40s         # Время после запуска ВМ, когда её метрики игнорируются
+    stabilization_duration: 60s  # Задержка перед масштабированием вниз, чтобы избежать частых колебаний
+    initial_size: 1              # Количество ВМ при создании группы
+    cpu_utilization_rule:
+      utilization_target: 40     # Целевое значение загрузки CPU в процентах для масштабирования
+
+# Политика развёртывания (как создаются и обновляются ВМ)
+deploy_policy:
+  max_creating: 3                          # Максимум одновременно создаваемых ВМ
+  max_unavailable: 3                       # Сколько ВМ могут быть недоступны при обновлении
+  max_expansion: 0                         # Запрещено превышать заданное количество ВМ при обновлении
+
+# Политика распределения ВМ по зонам доступности
+allocation_policy:
+  zones:
+    - zone_id: ru-central1-d               # Зона размещения ВМ
+      instance_tags_pool:                  # Теги, уникальные для каждой ВМ, — используются в шаблоне
+        - vm1
+        - vm2
+        - vm3
+
+# Настройка проверки состояния ВМ (health checks)
+health_checks_spec:
+  health_check_specs:
+    - http_options:
+        port: 80                           # Порт для проверки доступности
+        path: /                            # Путь для HTTP-запроса
+      interval: 2s                         # Интервал между проверками
+      timeout: 1s                          # Время ожидания ответа
+      unhealthy_threshold: 5               # Количество неудачных проверок до признания ВМ «больной»
+      healthy_threshold: 2                 # Количество успешных проверок до признания ВМ «здоровой»
+
+# Переменные, которые можно использовать в шаблоне (например, IP-адреса)
+variables:
+  - key: ip_vm1
+    value: 10.120.0.101
+  - key: ip_vm2
+    value: 10.120.0.102
+  - key: ip_vm3
+    value: 10.120.0.103
+
+# Шаблон конфигурации создаваемых ВМ
+instance_template:
+  name: backend-{instance.tag}             # Имя каждой ВМ — уникальное: backend-vm1, backend-vm2, ...
+  platform_id: standard-v2                 # Тип платформы (vCPU-архитектура)
+  resources_spec:
+    memory: 2G                             # Количество оперативной памяти
+    cores: 2                               # Количество vCPU
+
+  boot_disk_spec:
+    mode: READ_WRITE                       # Режим использования диска
+    disk_spec:
+      image_id: fd8dlvgiatiqd8tt2qke       # ID образа ОС (Ubuntu)
+      type_id: network-ssd                 # Тип диска (сетевой SSD)
+      size: 10g                            # Размер диска
+
+  network_interface_specs:
+    - subnet_ids:
+        - subnet_id                        # ID подсети, в которой создаются ВМ, можно получить командой "yc vpc subnet list"
+      primary_v4_address_spec:
+        address: "{ip_{instance.tag}}"     # Назначение IP-адреса по переменным (см. блок variables)
+
+  metadata:                                # Пользовательские данные для cloud-init
+    user-data: |-
+      #cloud-config
+      package_update: true
+      packages:
+        - nginx
+        - stress
+
+      write_files:
+        - path: /etc/systemd/system/stress-temp.service
+          permissions: '0644'
+          content: |
+            [Unit]
+            Description=Нагрузка CPU на ~100 процентов в течение 10 минут (2 потока)
+            After=network-online.target
+            Wants=network-online.target
+
+            [Service]
+            Type=oneshot
+            ExecStart=/bin/bash -c 'stress --cpu 2 --timeout 600'
+
+        - path: /etc/systemd/system/stress-temp.timer
+          permissions: '0644'
+          content: |
+            [Unit]
+            Description=Запуск stress на 10 минут после загрузки
+
+            [Timer]
+            OnBootSec=30sec
+            AccuracySec=5sec
+            Unit=stress-temp.service
+
+            [Install]
+            WantedBy=timers.target
+
+
+
+      runcmd:
+        - curl 169.254.169.254/latest/meta-data/local-ipv4 > /var/www/html/index.html
+        - systemctl enable nginx.service
+        - systemctl restart nginx.service    
+        - systemctl daemon-reload
+        - systemctl enable stress-temp.service
+        - systemctl start stress-temp.service
+
+# Описание целевой группы для NLB
+load_balancer_spec:
+  target_group_spec:
+    name: "web-server-group"                       # Имя целевой группы
+    description: "Целевая группа для web-серверов" # Описание целевой группы
+  max_opening_traffic_duration: 30s                # Время ожидания трафика
+  ignore_health_checks: false                      # false — использовать проверки состояния
+

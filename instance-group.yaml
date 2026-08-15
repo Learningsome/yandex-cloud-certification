@@ -1,0 +1,106 @@
+# Укажите ID сервисного аккаунта, от имени которого будет управляться группа ВМ
+service_account_id: some_id   # ID сервисного аккаунта sa-instance-group-manager
+
+# Имя и описание группы ВМ
+name: web-servers-pool                     # Уникальное имя группы виртуальных машин
+description: Web servers                   # Описание группы (необязательно)
+
+# Политика масштабирования
+scale_policy:
+  fixed_scale:
+    size: 3                                # Фиксированное количество ВМ в группе (всегда 3)
+
+# Политика развёртывания (как создаются и обновляются ВМ)
+deploy_policy:
+  max_creating: 3                          # Максимум одновременно создаваемых ВМ
+  max_unavailable: 3                       # Сколько ВМ могут быть недоступны при обновлении
+  max_expansion: 0                         # Запрещено превышать заданное количество ВМ при обновлении
+
+# Политика распределения ВМ по зонам доступности
+allocation_policy:
+  zones:
+    - zone_id: ru-central1-d               # Зона размещения ВМ
+      instance_tags_pool:                  # Теги, уникальные для каждой ВМ, — используются в шаблоне
+        - vm1
+        - vm2
+        - vm3
+
+# Настройка проверки состояния ВМ (health checks)
+health_checks_spec:
+  health_check_specs:
+    - http_options:
+        port: 80                           # Порт для проверки доступности
+        path: /                            # Путь для HTTP-запроса
+      interval: 2s                         # Интервал между проверками
+      timeout: 1s                          # Время ожидания ответа
+      unhealthy_threshold: 5               # Количество неудачных проверок до признания ВМ «больной»
+      healthy_threshold: 2                 # Количество успешных проверок до признания ВМ «здоровой»
+
+# Переменные, которые можно использовать в шаблоне (например, IP-адреса)
+variables:
+  - key: ip_vm1
+    value: 10.120.0.101
+  - key: ip_vm2
+    value: 10.120.0.102
+  - key: ip_vm3
+    value: 10.120.0.103
+
+# Шаблон конфигурации создаваемых ВМ
+instance_template:
+  name: backend-{instance.tag}             # Имя каждой ВМ — уникальное: backend-vm1, backend-vm2, ...
+  platform_id: standard-v2                 # Тип платформы (vCPU-архитектура)
+  resources_spec:
+    memory: 2G                             # Количество оперативной памяти
+    cores: 2                               # Количество vCPU
+
+  boot_disk_spec:
+    mode: READ_WRITE                       # Режим использования диска
+    disk_spec:
+      image_id: fd8dlvgiatiqd8tt2qke       # ID образа ОС (Ubuntu)
+      type_id: network-ssd                 # Тип диска (сетевой SSD)
+      size: 10g                            # Размер диска
+
+  network_interface_specs:
+    - subnet_ids:
+        - subnet_id                        # ID подсети, в которой создаются ВМ, можно получить командой "yc vpc subnet list"
+      primary_v4_address_spec:
+        address: "{ip_{instance.tag}}"     # Назначение IP-адреса по переменным (см. блок variables)
+
+  metadata:                                # Пользовательские данные для cloud-init
+    user-data: |-
+      #cloud-config
+      package_update: true                 # Обновление пакетов при старте
+      packages:
+        - nginx                            # Установка NGINX
+
+      write_files:                         # Создание systemd-юнитов на ВМ
+        - path: /etc/systemd/system/nginx-temp.service
+          permissions: '0644'
+          content: |
+            [Unit]
+            Description=Включить Nginx на 1 минуту
+            After=network-online.target
+            Wants=network-online.target
+
+            [Service]
+            Type=oneshot
+            ExecStart=/bin/bash -c 'systemctl start nginx && sleep 60 && systemctl stop nginx && systemctl disable nginx'
+
+        - path: /etc/systemd/system/nginx-temp.timer
+          permissions: '0644'
+          content: |
+            [Unit]
+            Description=Запуск Nginx на 1 минуту после загрузки
+
+            [Timer]
+            OnBootSec=30sec
+            AccuracySec=5sec
+            Unit=nginx-temp.service
+
+            [Install]
+            WantedBy=timers.target
+
+      runcmd:
+        - curl 169.254.169.254/latest/meta-data/local-ipv4 > /var/www/html/index.html  # Запись локального IP в HTML-файл
+        - systemctl enable nginx-temp.timer                                            # Включение таймера
+        - systemctl start nginx-temp.timer                                             # Запуск таймера
